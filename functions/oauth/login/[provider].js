@@ -1,13 +1,65 @@
+function base64url(bytes) {
+  let binary = "";
+
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function randomValue() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64url(bytes);
+}
+
+async function sha256(value) {
+  const data = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return base64url(new Uint8Array(hash));
+}
+
 export async function onRequestGet(context) {
   const provider = context.params.provider;
 
   if (provider !== "google" && provider !== "github") {
-    return new Response("Provider inválido", {
-      status: 400,
+    return new Response("Not Found", {
+      status: 404,
     });
   }
 
-  const state = crypto.randomUUID();
+  const transactionId = randomValue();
+  const state = randomValue();
+  const codeVerifier = randomValue();
+
+  const codeChallenge = await sha256(codeVerifier);
+  const idHash = await sha256(transactionId);
+  const stateHash = await sha256(state);
+
+  const nonce = provider === "google"
+    ? randomValue()
+    : null;
+
+  const expiresAt = Math.floor(Date.now() / 1000) + 600;
+
+  await context.env.DB.prepare(`
+    INSERT INTO oauth_transactions
+      (id_hash, provider, state_hash, nonce, code_verifier, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `)
+    .bind(
+      idHash,
+      provider,
+      stateHash,
+      nonce,
+      codeVerifier,
+      expiresAt
+    )
+    .run();
 
   let authorizationUrl;
 
@@ -18,6 +70,9 @@ export async function onRequestGet(context) {
       response_type: "code",
       scope: "openid email profile",
       state,
+      nonce,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
     });
 
     authorizationUrl =
@@ -28,8 +83,10 @@ export async function onRequestGet(context) {
     const params = new URLSearchParams({
       client_id: context.env.GITHUB_CLIENT_ID,
       redirect_uri: `${context.env.PUBLIC_BASE_URL}/oauth/callback/github`,
-      scope: "read:user user:email",
+      response_type: "code",
       state,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
     });
 
     authorizationUrl =
@@ -40,8 +97,9 @@ export async function onRequestGet(context) {
     status: 302,
     headers: {
       Location: authorizationUrl,
-      "Set-Cookie": `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      "Set-Cookie":
+        `__Host-oauth-tx=${transactionId}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      "Cache-Control": "no-store",
     },
   });
 }
-
