@@ -1,5 +1,8 @@
 export async function onRequestGet(context) {
   const provider = context.params.provider;
+  const url = new URL(context.request.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
 
   if (provider !== "google" && provider !== "github") {
     return new Response("Provider inválido", {
@@ -7,40 +10,29 @@ export async function onRequestGet(context) {
     });
   }
 
-  const state = crypto.randomUUID();
-
-  let authorizationUrl;
-
-  if (provider === "google") {
-    const params = new URLSearchParams({
-      client_id: context.env.GOOGLE_CLIENT_ID,
-      redirect_uri: `${context.env.PUBLIC_BASE_URL}/oauth/callback/google`,
-      response_type: "code",
-      scope: "openid email profile",
-      state,
+  if (!code || !state) {
+    return new Response("Código ou state ausente", {
+      status: 400,
     });
-
-    authorizationUrl =
-      `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
   }
 
-  if (provider === "github") {
-    const params = new URLSearchParams({
-      client_id: context.env.GITHUB_CLIENT_ID,
-      redirect_uri: `${context.env.PUBLIC_BASE_URL}/oauth/callback/github`,
-      scope: "read:user user:email",
-      state,
-    });
+  const cookies = context.request.headers.get("Cookie") || "";
+  const stateCookie = cookies
+    .split(";")
+    .map((cookie) => cookie.trim())
+    .find((cookie) => cookie.startsWith("oauth_state="));
 
-    authorizationUrl =
-      `https://github.com/login/oauth/authorize?${params.toString()}`;
+  const savedState = stateCookie
+    ? stateCookie.substring("oauth_state=".length)
+    : null;
+
+  if (!savedState || savedState !== state) {
+    return new Response("State inválido", {
+      status: 400,
+    });
   }
 
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: authorizationUrl,
-      "Set-Cookie": `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
-    },
+  return new Response(`Callback recebido: ${provider}`, {
+    status: 200,
   });
 }
